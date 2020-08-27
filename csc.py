@@ -1,9 +1,11 @@
-import bluetooth
 import struct
 import time
+from micropython import const
+from machine import Pin
+import bluetooth
+
 from ble_advertising import advertising_payload
 
-from micropython import const
 
 _IRQ_CENTRAL_CONNECT = const(1)
 _IRQ_CENTRAL_DISCONNECT = const(2)
@@ -37,7 +39,7 @@ _CSC_SERVICE = (
 _ADV_APPEARANCE_CYCLING_SPEED_CADENCE_SENSOR = const(1157)
 
 class BLECycling:
-    def __init__(self, ble, name="cheapensor", debug=False):
+    def __init__(self, ble, speed_sensor_pin, name="cheapensor", debug=False):
         self._ble = ble
         self._ble.active(True)
         self._ble.irq(handler=self._irq)
@@ -57,7 +59,14 @@ class BLECycling:
 
         self._debug=debug
 
-    def _send_measurement(self):
+        # IR Speed Sensor
+        self.speed_sensor = Pin(speed_sensor_pin, Pin.IN)
+        self.speed_sensor.irq(trigger=Pin.IRQ_RISING, handler=self.speed_sensor_irq)
+
+        if debug:
+            print("Initialised CSC sensor")
+
+    def send_measurement(self):
         # Measurement
         # Byte 0 is CSC Feature
         # Byte 1 to 4 are cumulative_wheel_revolutions
@@ -85,16 +94,26 @@ class BLECycling:
             print(_measurement)
 
     def wheel_event(self):
-        self._last_wheel_event_time=time.ticks_ms()
-        self._cumulative_wheel_revolutions+=1
-        # Send the measurement out
-        self._send_measurement()
+        ticks_ms=time.ticks_ms()
+        # Limiting to 50KMPH on a 700x35c ( 2.17m circumference cycle)
+        if time.ticks_diff(ticks_ms,self._last_wheel_event_time) > 167:
+            self._last_wheel_event_time=ticks_ms
+            self._cumulative_wheel_revolutions+=1
+            # Send the measurement out
+            self.send_measurement()
 
     def crank_event(self):
-        self._last_crank_event_time=time.ticks_ms()
-        self._cumulative_crank_revolutions+=1
-        # Send the measurement out
-        self._send_measurement()
+        ticks_ms=time.ticks_ms()
+        if time.ticks_diff(ticks_ms,self._last_crank_event_time) > 167:
+            self._last_crank_event_time=ticks_ms
+            self._cumulative_crank_revolutions+=1
+            # Send the measurement out
+            self.send_measurement()
+
+    def speed_sensor_irq(self, pin):
+        self.wheel_event()
+        if self._debug:
+            print("Speed sensor")
 
     def _irq(self, event, data):
         # Track connections so we can send notifications.
@@ -118,8 +137,5 @@ class BLECycling:
 
 def activate(debug=False):
     ble = bluetooth.BLE()
-    csc = BLECycling(ble,debug=debug)
-    while True:
-        time.sleep_ms(1000)
-        csc.wheel_event()
-        csc.crank_event()
+    csc = BLECycling(ble, speed_sensor_pin=15, debug=debug)
+    print("CSC Activated")
