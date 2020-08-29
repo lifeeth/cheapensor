@@ -1,7 +1,7 @@
 import struct
 import time
 from micropython import const
-from machine import Pin
+from machine import Pin, Timer
 import bluetooth
 
 from ble_advertising import advertising_payload
@@ -63,10 +63,21 @@ class BLECycling:
         self.speed_sensor = Pin(speed_sensor_pin, Pin.IN)
         self.speed_sensor.irq(trigger=Pin.IRQ_RISING, handler=self.speed_sensor_irq)
 
+        # Use a timer to periodically send out data.
+        self.enable_transmit=False
+        timer3 = Timer(3)
+        timer3.init(period=1000, mode=Timer.PERIODIC, callback=self.arm_measurement)
+
         if debug:
             print("Initialised CSC sensor")
 
+    def arm_measurement(self, timer):
+        self.enable_transmit=True
+
     def send_measurement(self):
+        # If measurement is not enabled - Do nothing
+        if self.enable_transmit == False:
+            return
         # Measurement
         # Byte 0 is CSC Feature
         # Byte 1 to 4 are cumulative_wheel_revolutions
@@ -86,6 +97,10 @@ class BLECycling:
             # Notify connected centrals.
             self._ble.gatts_notify(conn_handle, self._handle_measurement, _measurement)
 
+        # After transmitting disable measurement so that the timer can enable it again in a second.
+        # This prevents transmitting at the same rate as wheel / cadence events
+        self.enable_transmit=False
+
         if self._debug:
             print(self._cumulative_wheel_revolutions)
             print(self._last_wheel_event_time)
@@ -95,8 +110,8 @@ class BLECycling:
 
     def wheel_event(self):
         ticks_ms=time.ticks_ms()
-        # Limiting to 50KMPH on a 700x35c ( 2.17m circumference cycle)
-        if time.ticks_diff(ticks_ms,self._last_wheel_event_time) > 167:
+        # Limiting to 60KMPH on a 700x35c ( 2.17m circumference cycle)
+        if time.ticks_diff(ticks_ms,self._last_wheel_event_time) > 130:
             self._last_wheel_event_time=ticks_ms
             self._cumulative_wheel_revolutions+=1
             # Send the measurement out
@@ -104,7 +119,8 @@ class BLECycling:
 
     def crank_event(self):
         ticks_ms=time.ticks_ms()
-        if time.ticks_diff(ticks_ms,self._last_crank_event_time) > 167:
+        # Limiting to ~420 RPM
+        if time.ticks_diff(ticks_ms,self._last_crank_event_time) > 130:
             self._last_crank_event_time=ticks_ms
             self._cumulative_crank_revolutions+=1
             # Send the measurement out
