@@ -28,8 +28,6 @@ _CSC_MEASUREMENT_CHAR = (
 _CSC_FEATURE_WHEEL_REV_DATA=0x01
 _CSC_FEATURE_CRANK_REV_DATA=0x02
 
-_CSC_FEATURES = _CSC_FEATURE_WHEEL_REV_DATA | _CSC_FEATURE_CRANK_REV_DATA
-
 _CSC_SERVICE = (
     _CSC_SERVICE_UUID,
     (_CSC_FEATURE_CHAR,_CSC_MEASUREMENT_CHAR),
@@ -39,17 +37,20 @@ _CSC_SERVICE = (
 _ADV_APPEARANCE_CYCLING_SPEED_CADENCE_SENSOR = const(1157)
 
 class BLECycling:
-    def __init__(self, ble, speed_sensor_pin, name="cheapensor", debug=False):
+    def __init__(self, ble, speed_sensor_pin, cadence_sensor_pin=None, name="cheapensor", debug=False):
         self._ble = ble
         self._ble.active(True)
         self._ble.irq(handler=self._irq)
+        self._CSC_FEATURES = _CSC_FEATURE_WHEEL_REV_DATA
+        if cadence_sensor_pin:
+            self._CSC_FEATURES = _CSC_FEATURE_WHEEL_REV_DATA | _CSC_FEATURE_CRANK_REV_DATA
         ((self._handle_feature,self._handle_measurement,),) = self._ble.gatts_register_services((_CSC_SERVICE,))
         self._connections = set()
         self._payload = advertising_payload(
             name=name, services=[_CSC_SERVICE_UUID], appearance=_ADV_APPEARANCE_CYCLING_SPEED_CADENCE_SENSOR
         )
         # Write the feature
-        self._ble.gatts_write(self._handle_feature, struct.pack("<h", _CSC_FEATURES))
+        self._ble.gatts_write(self._handle_feature, struct.pack("<h", self._CSC_FEATURES))
         self._advertise()
 
         self._cumulative_wheel_revolutions=0
@@ -62,6 +63,9 @@ class BLECycling:
         # IR Speed Sensor
         self.speed_sensor = Pin(speed_sensor_pin, Pin.IN)
         self.speed_sensor.irq(trigger=Pin.IRQ_RISING, handler=self.speed_sensor_irq)
+        if cadence_sensor_pin:
+            self.cadence_sensor = Pin(cadence_sensor_pin, Pin.IN)
+            self.cadence_sensor.irq(trigger=Pin.IRQ_RISING, handler=self.cadence_sensor_irq)
 
         # Use a timer to periodically send out data.
         self.enable_transmit=False
@@ -84,15 +88,16 @@ class BLECycling:
         # Byte 5,6 are last_wheel_event_time
         # Byte 7,8 are cumulative_crank_revolutions
         # Bytw 9,10 are last_crank_event_time
-        _measurement=bytearray(11)
-        _measurement[0]=_CSC_FEATURES
+        _measurement=bytearray(7)
+        _measurement[0]=self._CSC_FEATURES
         # Pack into unsigned int - little-endian
         _measurement[1:5]=struct.pack("<I",self._cumulative_wheel_revolutions)
         # 1 second = 1024 for the event time as per CSC spec
         _measurement[5:7]=struct.pack("<H",int(self._last_wheel_event_time*1.024))
-        _measurement[7:9]=struct.pack("<H",self._cumulative_crank_revolutions)
-        # 1 second = 1024 for the event time as per CSC spec
-        _measurement[9:]=struct.pack("<H",int(self._last_crank_event_time*1.024))
+        if self._CSC_FEATURES==(_CSC_FEATURE_WHEEL_REV_DATA | _CSC_FEATURE_CRANK_REV_DATA):
+            _measurement.extend(struct.pack("<H",self._cumulative_crank_revolutions))
+            # 1 second = 1024 for the event time as per CSC spec
+            _measurement.extend(struct.pack("<H",int(self._last_crank_event_time*1.024)))
         for conn_handle in self._connections:
             # Notify connected centrals.
             self._ble.gatts_notify(conn_handle, self._handle_measurement, _measurement)
@@ -130,6 +135,11 @@ class BLECycling:
         self.wheel_event()
         if self._debug:
             print("Speed sensor")
+
+    def cadence_sensor_irq(self, pin):
+        self.crank_event()
+        if self._debug:
+            print("Candence sensor")
 
     def _irq(self, event, data):
         # Track connections so we can send notifications.
